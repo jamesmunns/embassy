@@ -745,45 +745,49 @@ impl<'d, T: Instance> Bus<'d, T> {
 
         let r = T::regs();
 
-        // Configure RX fifo size. All endpoints share the same FIFO area.
-        let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + ep_fifo_size(&self.ep_out);
-        trace!("configuring rx fifo size={}", rx_fifo_size_words);
+        // TODO: is this necessary? FIFO errata
+        critical_section::with(|_| {
+            // Configure RX fifo size. All endpoints share the same FIFO area.
+            let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + ep_fifo_size(&self.ep_out);
+            trace!("configuring rx fifo size={}", rx_fifo_size_words);
 
-        r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words));
+            r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words));
 
-        // Configure TX (USB in direction) fifo size for each endpoint
-        let mut fifo_top = rx_fifo_size_words;
-        for i in 0..T::ENDPOINT_COUNT {
-            if let Some(ep) = self.ep_in[i] {
-                trace!(
-                    "configuring tx fifo ep={}, offset={}, size={}",
-                    i,
-                    fifo_top,
-                    ep.fifo_size_words
-                );
+            // Configure TX (USB in direction) fifo size for each endpoint
+            let mut fifo_top = rx_fifo_size_words;
+            for i in 0..T::ENDPOINT_COUNT {
+                if let Some(ep) = self.ep_in[i] {
+                    trace!(
+                        "configuring tx fifo ep={}, offset={}, size={}",
+                        i,
+                        fifo_top,
+                        ep.fifo_size_words
+                    );
 
-                let dieptxf = if i == 0 { r.dieptxf0() } else { r.dieptxf(i - 1) };
+                    let dieptxf = if i == 0 { r.dieptxf0() } else { r.dieptxf(i - 1) };
 
-                dieptxf.write(|w| {
-                    w.set_fd(ep.fifo_size_words);
-                    w.set_sa(fifo_top);
-                });
+                    dieptxf.write(|w| {
+                        w.set_fd(ep.fifo_size_words);
+                        w.set_sa(fifo_top);
+                    });
 
-                fifo_top += ep.fifo_size_words;
+                    fifo_top += ep.fifo_size_words;
+                }
             }
-        }
 
-        assert!(
-            fifo_top <= T::FIFO_DEPTH_WORDS,
-            "FIFO allocations exceeded maximum capacity"
-        );
+            assert!(
+                fifo_top <= T::FIFO_DEPTH_WORDS,
+                "FIFO allocations exceeded maximum capacity"
+            );
 
-        // Flush fifos
-        r.grstctl().write(|w| {
-            w.set_rxfflsh(true);
-            w.set_txfflsh(true);
-            w.set_txfnum(0x10);
+            // Flush fifos
+            r.grstctl().write(|w| {
+                w.set_rxfflsh(true);
+                w.set_txfflsh(true);
+                w.set_txfnum(0x10);
+            });
         });
+
         loop {
             let x = r.grstctl().read();
             if !x.rxfflsh() && !x.txfflsh() {
@@ -1281,27 +1285,33 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointIn for Endpoint<'d, T, In> {
             .await
         }
 
-        // Setup transfer size
-        r.dieptsiz(index).write(|w| {
-            w.set_mcnt(1);
-            w.set_pktcnt(1);
-            w.set_xfrsiz(buf.len() as _);
-        });
 
+        // NOTE(AJM): Errata 2.14.1 Transmit data FIFO is corrupted when a write sequence to the FIFO is interrupted with
+        // accesses to certain OTG_FS registers
+        //
+        // Prevent the interrupt (which might poke FIFOs) from executing while copying data to FIFOs. TODO: Maybe this could be
+        // a more "scoped" critical section, e.g. only notching the USB interrupt, but setup + copying <= 64b is fast
         critical_section::with(|_| {
+            // Setup transfer size
+            r.dieptsiz(index).write(|w| {
+                w.set_mcnt(1);
+                w.set_pktcnt(1);
+                w.set_xfrsiz(buf.len() as _);
+            });
+
             // Enable endpoint
             r.diepctl(index).modify(|w| {
                 w.set_cnak(true);
                 w.set_epena(true);
             });
-        });
 
-        // Write data to FIFO
-        for chunk in buf.chunks(4) {
-            let mut tmp = [0u8; 4];
-            tmp[0..chunk.len()].copy_from_slice(chunk);
-            r.fifo(index).write_value(regs::Fifo(u32::from_ne_bytes(tmp)));
-        }
+            // Write data to FIFO
+            for chunk in buf.chunks(4) {
+                let mut tmp = [0u8; 4];
+                tmp[0..chunk.len()].copy_from_slice(chunk);
+                r.fifo(index).write_value(regs::Fifo(u32::from_ne_bytes(tmp)));
+            }
+        });
 
         trace!("write done ep={:?}", self.info.addr);
 
