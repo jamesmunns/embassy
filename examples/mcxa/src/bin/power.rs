@@ -11,7 +11,7 @@ use {defmt_rtt as _, embassy_mcxa as hal, panic_probe as _};
 async fn main(_spawner: Spawner) {
     let mut cfg = hal::config::Config::default();
     cfg.clock_cfg.firc = None;
-    cfg.clock_cfg.sirc.fro_12m_enabled = false;
+    cfg.clock_cfg.sirc.fro_12m_enabled = true;
     cfg.clock_cfg.sirc.fro_lf_div = None;
     let mut fro = Fro16KConfig::default();
     fro.vsys_domain_active = true;
@@ -20,7 +20,7 @@ async fn main(_spawner: Spawner) {
     cfg.clock_cfg.sosc = None;
     cfg.clock_cfg.spll = None;
     cfg.clock_cfg.main_clock = MainClockConfig {
-        source: MainClockSource::RoscFro16K,
+        source: MainClockSource::SircFro12M,
         power: PoweredClock::NormalEnabledDeepSleepDisabled,
         ahb_clk_div: Div8::no_div(),
     };
